@@ -81,7 +81,60 @@ class AudioStream(abc.ABC):
         else:
             return f"{self.images_dir}/{image_name}.png"
     
-    def analyze(self, signal, sample_rate, prefix="", processing_type="default"):
+    def save_audio(self, signal, sample_rate, filename, processing_type="default", is_filtered=False):
+        """
+        Сохраняет аудиосигнал в файл.
+        
+        Args:
+            signal: Аудиосигнал
+            sample_rate: Частота дискретизации
+            filename (str): Имя файла без расширения
+            processing_type (str): Тип обработки ('default', 'mono', 'stereo')
+            is_filtered (bool): Флаг, указывающий, является ли аудио отфильтрованным
+            
+        Returns:
+            str: Полный путь к сохраненному файлу
+        """
+        import torch
+        import numpy as np
+        
+        # Определяем директорию для аудиофайлов
+        if is_filtered:
+            # Папка filtered_audio находится на одном уровне с папкой images
+            audio_dir = f"filtered_audio/{self.name}"
+        else:
+            # Обычные аудиофайлы сохраняются в папку audio на одном уровне с images
+            audio_dir = f"audio/{self.name}"
+        
+        # Добавляем подпапки для mono/stereo если нужно
+        if processing_type == "mono":
+            audio_dir = f"{audio_dir}/mono"
+        elif processing_type == "stereo":
+            audio_dir = f"{audio_dir}/stereo"
+        
+        ensure_dir(audio_dir)
+        
+        # Полный путь к файлу
+        audio_path = f"{audio_dir}/{filename}.wav"
+        
+        # Преобразуем сигнал в тензор, если это не тензор
+        if not isinstance(signal, torch.Tensor):
+            # Если это массив NumPy, создаем копию для избежания проблем с отрицательными шагами
+            if isinstance(signal, np.ndarray):
+                signal = np.array(signal, copy=True)
+            signal = torch.tensor(signal)
+        
+        # Убедимся, что сигнал имеет правильную размерность [channels, samples]
+        if signal.dim() == 1:
+            signal = signal.unsqueeze(0)
+        
+        # Сохраняем аудиофайл
+        torchaudio.save(audio_path, signal, sample_rate)
+        print(f"Аудио сохранено в {audio_path}")
+        
+        return audio_path
+    
+    def analyze(self, signal, sample_rate, prefix="", processing_type="default", is_filtered=False):
         """
         Проводит анализ сигнала и сохраняет результаты.
         
@@ -90,6 +143,7 @@ class AudioStream(abc.ABC):
             sample_rate: Частота дискретизации
             prefix (str): Префикс для имен файлов
             processing_type (str): Тип обработки ('default', 'mono', 'stereo')
+            is_filtered (bool): Флаг, указывающий, является ли аудио отфильтрованным
         """
         prefix = f"{prefix}_" if prefix else ""
         
@@ -99,6 +153,9 @@ class AudioStream(abc.ABC):
                        save_path=self.save_image(f"{prefix}spectogram", processing_type))
         draw_amplitude_vs_frequency(signal, sample_rate, save=True, 
                                    save_path=self.save_image(f"{prefix}amplitude_frequency", processing_type))
+        
+        # Сохраняем аудиофайл
+        self.save_audio(signal, sample_rate, f"{prefix}audio", processing_type, is_filtered)
     
     def convert_to_mono(self, signal):
         """
@@ -220,22 +277,48 @@ class AudioStream(abc.ABC):
         """
         filtered_signals = {}
         
-        highpass_filtered = highpass_filter(signal, sample_rate, cutoff_freq=1000)
+        # 1. Сохраняем оригинальный сигнал в словарь, но не анализируем повторно
+        filtered_signals['original'] = signal
+        # Не сохраняем оригинал повторно, только отображаем информацию
+        print(f"Обработка оригинального сигнала")
+        
+        # 2. Применение фильтра верхних частот
+        highpass_filtered = self._apply_highpass_filter(signal, sample_rate, processing_type)
         filtered_signals['filter1_highpass'] = highpass_filtered
-        self.analyze(highpass_filtered, sample_rate, prefix="filter1_highpass", processing_type=processing_type)
-        print(f"Применен фильтр верхних частот (№1) с частотой среза 1000 Гц")
         
-        butterworth_filtered = butterwart_filter(signal, sample_rate, order=5, cutoff_freq=2000, type='lowpass')
+        # 3. Применение фильтра Баттерворта
+        butterworth_filtered = self._apply_butterworth_filter(signal, sample_rate, processing_type)
         filtered_signals['filter9_butterworth'] = butterworth_filtered
-        self.analyze(butterworth_filtered, sample_rate, prefix="filter9_butterworth", processing_type=processing_type)
-        print(f"Применен фильтр Баттерворта (№9) с частотой среза 2000 Гц")
         
-        combined_filtered = butterwart_filter(highpass_filtered, sample_rate, order=5, cutoff_freq=2000, type='lowpass')
+        # 4. Применение комбинированного фильтра
+        combined_filtered = self._apply_combined_filter(highpass_filtered, sample_rate, processing_type)
         filtered_signals['combined_filters'] = combined_filtered
-        self.analyze(combined_filtered, sample_rate, prefix="combined_filters", processing_type=processing_type)
-        print(f"Применены последовательно оба фильтра: верхних частот и Баттерворта")
         
         return filtered_signals
+
+    def _apply_highpass_filter(self, signal, sample_rate, processing_type):
+        """Применяет фильтр верхних частот и анализирует результат"""
+        highpass_filtered = highpass_filter(signal, sample_rate, cutoff_freq=1000)
+        self.analyze(highpass_filtered, sample_rate, prefix="filter1_highpass", 
+                    processing_type=processing_type, is_filtered=True)
+        print(f"Применен фильтр верхних частот (№1) с частотой среза 1000 Гц")
+        return highpass_filtered
+
+    def _apply_butterworth_filter(self, signal, sample_rate, processing_type):
+        """Применяет фильтр Баттерворта и анализирует результат"""
+        butterworth_filtered = butterwart_filter(signal, sample_rate, order=5, cutoff_freq=2000, type='lowpass')
+        self.analyze(butterworth_filtered, sample_rate, prefix="filter9_butterworth", 
+                    processing_type=processing_type, is_filtered=True)
+        print(f"Применен фильтр Баттерворта (№9) с частотой среза 2000 Гц")
+        return butterworth_filtered
+
+    def _apply_combined_filter(self, signal, sample_rate, processing_type):
+        """Применяет комбинированный фильтр и анализирует результат"""
+        combined_filtered = butterwart_filter(signal, sample_rate, order=5, cutoff_freq=2000, type='lowpass')
+        self.analyze(combined_filtered, sample_rate, prefix="combined_filters", 
+                    processing_type=processing_type, is_filtered=True)
+        print(f"Применены последовательно оба фильтра: верхних частот и Баттерворта")
+        return combined_filtered
 
     def apply_filters_to_stereo(self, signal, sample_rate, prefix=""):
         """
@@ -257,80 +340,212 @@ class AudioStream(abc.ABC):
         num_channels = signal.shape[0]
         filtered_channels = {}
         
-        if num_channels > 1:
-            plt.figure(figsize=(12, 4 * num_channels))
-            highpass_filtered = {}
-            
-            for i in range(num_channels):
-                channel_signal = signal[i]
-                filtered = highpass_filter(channel_signal, sample_rate, cutoff_freq=1000)
-                highpass_filtered[f"channel_{i+1}"] = filtered
-                
-                plt.subplot(num_channels, 1, i+1)
-                plt.plot(filtered)
-                plt.title(f"Канал {i+1} - Фильтр верхних частот (№1)")
-                plt.xlabel('Сэмпл')
-                plt.ylabel('Колебания')
-                plt.grid(True)
-            
-            plt.tight_layout()
-            save_path = self.save_image(f"{prefix}_all_channels_filter1_highpass", "stereo")
-            ensure_dir(os.path.dirname(save_path))
-            plt.savefig(save_path)
-            plt.close()
-            
-            filtered_channels['filter1_highpass'] = highpass_filtered
-            
-            plt.figure(figsize=(12, 4 * num_channels))
-            butterworth_filtered = {}
-            
-            for i in range(num_channels):
-                channel_signal = signal[i]
-                filtered = butterwart_filter(channel_signal, sample_rate, order=5, cutoff_freq=2000, type='lowpass')
-                butterworth_filtered[f"channel_{i+1}"] = filtered
-                
-                plt.subplot(num_channels, 1, i+1)
-                plt.plot(filtered)
-                plt.title(f"Канал {i+1} - Фильтр Баттерворта (№9)")
-                plt.xlabel('Сэмпл')
-                plt.ylabel('Колебания')
-                plt.grid(True)
-            
-            plt.tight_layout()
-            save_path = self.save_image(f"{prefix}_all_channels_filter9_butterworth", "stereo")
-            ensure_dir(os.path.dirname(save_path))
-            plt.savefig(save_path)
-            plt.close()
-            
-            filtered_channels['filter9_butterworth'] = butterworth_filtered
-            
-            plt.figure(figsize=(12, 4 * num_channels))
-            combined_filtered = {}
-            
-            for i in range(num_channels):
-                filtered = butterwart_filter(highpass_filtered[f"channel_{i+1}"], sample_rate, order=5, cutoff_freq=2000, type='lowpass')
-                combined_filtered[f"channel_{i+1}"] = filtered
-                
-                plt.subplot(num_channels, 1, i+1)
-                plt.plot(filtered)
-                plt.title(f"Канал {i+1} - Последовательное применение фильтров")
-                plt.xlabel('Сэмпл')
-                plt.ylabel('Колебания')
-                plt.grid(True)
-            
-            plt.tight_layout()
-            save_path = self.save_image(f"{prefix}_all_channels_combined_filters", "stereo")
-            ensure_dir(os.path.dirname(save_path))
-            plt.savefig(save_path)
-            plt.close()
-            
-            filtered_channels['combined_filters'] = combined_filtered
-            
-            print(f"Применены фильтры к {num_channels} каналам и созданы объединенные изображения")
-        else:
-            filtered_channels = self.apply_filters(signal[0], sample_rate, processing_type="stereo")
+        # Обработка одноканального сигнала
+        if num_channels == 1:
+            return self.apply_filters(signal[0], sample_rate, processing_type="stereo")
+        
+        # Обработка многоканального сигнала
+        # 1. Сохраняем и анализируем оригинальный сигнал
+        filtered_channels['original'] = self._process_original_stereo(signal, sample_rate, prefix)
+        
+        # 2. Применяем фильтр верхних частот
+        highpass_filtered = self._apply_highpass_to_stereo(signal, sample_rate, prefix)
+        filtered_channels['filter1_highpass'] = highpass_filtered
+        
+        # 3. Применяем фильтр Баттерворта
+        butterworth_filtered = self._apply_butterworth_to_stereo(signal, sample_rate, prefix)
+        filtered_channels['filter9_butterworth'] = butterworth_filtered
+        
+        # 4. Применяем комбинированный фильтр
+        combined_filtered = self._apply_combined_to_stereo(highpass_filtered, sample_rate, prefix)
+        filtered_channels['combined_filters'] = combined_filtered
+        
+        print(f"Применены фильтры к {num_channels} каналам, созданы объединенные изображения и сохранены аудиофайлы")
         
         return filtered_channels
+
+    def _process_original_stereo(self, signal, sample_rate, prefix):
+        """Обрабатывает и анализирует оригинальный стерео сигнал"""
+        num_channels = signal.shape[0]
+        original_channels = {}
+        
+        for i in range(num_channels):
+            original_channels[f"channel_{i+1}"] = signal[i]
+        
+        # Не сохраняем оригинал повторно, только отображаем информацию
+        print(f"Обработка оригинального стерео сигнала")
+        
+        # Отображаем осциллограмму
+        self._plot_stereo_oscillogram(signal, prefix, "Оригинальный сигнал")
+        
+        # Отображаем спектрограмму
+        self._plot_stereo_spectogram(signal, sample_rate, prefix, "оригинального сигнала")
+        
+        return original_channels
+
+    def _apply_highpass_to_stereo(self, signal, sample_rate, prefix):
+        """Применяет фильтр верхних частот к стерео сигналу"""
+        import torch
+        import numpy as np
+        
+        num_channels = signal.shape[0]
+        highpass_filtered = {}
+        
+        # Применяем фильтр к каждому каналу
+        for i in range(num_channels):
+            channel_signal = signal[i]
+            filtered = highpass_filter(channel_signal, sample_rate, cutoff_freq=1000)
+            # Преобразуем NumPy массив в тензор PyTorch
+            if isinstance(filtered, np.ndarray):
+                filtered = torch.tensor(np.array(filtered, copy=True))
+            highpass_filtered[f"channel_{i+1}"] = filtered
+        
+        # Отображаем осциллограмму
+        self._plot_stereo_oscillogram(
+            [highpass_filtered[f"channel_{i+1}"] for i in range(num_channels)],
+            prefix, 
+            "Фильтр верхних частот (№1)"
+        )
+        
+        # Сохраняем аудио - теперь все элементы уже тензоры
+        highpass_audio = torch.stack([highpass_filtered[f"channel_{i+1}"] for i in range(num_channels)])
+        self.save_audio(highpass_audio, sample_rate, f"{prefix}_filter1_highpass", "stereo", is_filtered=True)
+        
+        # Отображаем спектрограмму
+        self._plot_stereo_spectogram(
+            [highpass_filtered[f"channel_{i+1}"] for i in range(num_channels)],
+            sample_rate,
+            prefix,
+            "после фильтра верхних частот",
+            suffix="filter1_highpass"
+        )
+        
+        return highpass_filtered
+
+    def _apply_butterworth_to_stereo(self, signal, sample_rate, prefix):
+        """Применяет фильтр Баттерворта к стерео сигналу"""
+        import torch
+        import numpy as np
+        
+        num_channels = signal.shape[0]
+        butterworth_filtered = {}
+        
+        # Применяем фильтр к каждому каналу
+        for i in range(num_channels):
+            channel_signal = signal[i]
+            filtered = butterwart_filter(channel_signal, sample_rate, order=5, cutoff_freq=2000, type='lowpass')
+            # Преобразуем NumPy массив в тензор PyTorch
+            if isinstance(filtered, np.ndarray):
+                filtered = torch.tensor(np.array(filtered, copy=True))
+            butterworth_filtered[f"channel_{i+1}"] = filtered
+        
+        # Отображаем осциллограмму
+        self._plot_stereo_oscillogram(
+            [butterworth_filtered[f"channel_{i+1}"] for i in range(num_channels)],
+            prefix, 
+            "Фильтр Баттерворта (№9)"
+        )
+        
+        # Сохраняем аудио
+        butterworth_audio = torch.stack([butterworth_filtered[f"channel_{i+1}"] for i in range(num_channels)])
+        self.save_audio(butterworth_audio, sample_rate, f"{prefix}_filter9_butterworth", "stereo", is_filtered=True)
+        
+        # Отображаем спектрограмму
+        self._plot_stereo_spectogram(
+            [butterworth_filtered[f"channel_{i+1}"] for i in range(num_channels)],
+            sample_rate,
+            prefix,
+            "после фильтра Баттерворта",
+            suffix="filter9_butterworth"
+        )
+        
+        return butterworth_filtered
+
+    def _apply_combined_to_stereo(self, highpass_filtered, sample_rate, prefix):
+        """Применяет комбинированный фильтр к стерео сигналу"""
+        import torch
+        import numpy as np
+        
+        num_channels = len(highpass_filtered)
+        combined_filtered = {}
+        
+        # Применяем фильтр к каждому каналу
+        for i in range(num_channels):
+            filtered = butterwart_filter(
+                highpass_filtered[f"channel_{i+1}"], 
+                sample_rate, 
+                order=5, 
+                cutoff_freq=2000, 
+                type='lowpass'
+            )
+            # Преобразуем NumPy массив в тензор PyTorch
+            if isinstance(filtered, np.ndarray):
+                filtered = torch.tensor(np.array(filtered, copy=True))
+            combined_filtered[f"channel_{i+1}"] = filtered
+        
+        # Отображаем осциллограмму
+        self._plot_stereo_oscillogram(
+            [combined_filtered[f"channel_{i+1}"] for i in range(num_channels)],
+            prefix, 
+            "Последовательное применение фильтров"
+        )
+        
+        # Сохраняем аудио
+        combined_audio = torch.stack([combined_filtered[f"channel_{i+1}"] for i in range(num_channels)])
+        self.save_audio(combined_audio, sample_rate, f"{prefix}_combined_filters", "stereo", is_filtered=True)
+        
+        # Отображаем спектрограмму
+        self._plot_stereo_spectogram(
+            [combined_filtered[f"channel_{i+1}"] for i in range(num_channels)],
+            sample_rate,
+            prefix,
+            "после комбинированного фильтра",
+            suffix="combined_filters"
+        )
+        
+        return combined_filtered
+
+    def _plot_stereo_oscillogram(self, signals, prefix, title_suffix):
+        """Отображает осциллограмму для стерео сигнала"""
+        num_channels = len(signals)
+        plt.figure(figsize=(12, 4 * num_channels))
+        
+        for i in range(num_channels):
+            plt.subplot(num_channels, 1, i+1)
+            plt.plot(signals[i])
+            plt.title(f"Канал {i+1} - {title_suffix}")
+            plt.xlabel('Сэмпл')
+            plt.ylabel('Колебания')
+            plt.grid(True)
+        
+        plt.tight_layout()
+        save_path = self.save_image(f"{prefix}_all_channels_{title_suffix.lower().replace(' ', '_')}", "stereo")
+        ensure_dir(os.path.dirname(save_path))
+        plt.savefig(save_path)
+        plt.close()
+
+    def _plot_stereo_spectogram(self, signals, sample_rate, prefix, title_suffix, suffix=None):
+        """Отображает спектрограмму для стерео сигнала"""
+        num_channels = len(signals)
+        plt.figure(figsize=(12, 4 * num_channels))
+        
+        for i in range(num_channels):
+            plt.subplot(num_channels, 1, i+1)
+            f, t, Sxx = scipy.signal.spectrogram(signals[i], fs=sample_rate, nperseg=1024, noverlap=900)
+            Sxx = Sxx + 1e-10
+            Sxx_db = 10 * np.log10(Sxx)
+            plt.pcolormesh(t, f, Sxx_db, shading='gouraud')
+            plt.title(f"Канал {i+1} - Спектрограмма {title_suffix}")
+            plt.xlabel('Время, с')
+            plt.ylabel('Частота, Гц')
+            plt.colorbar(label='Интенсивность, дБ')
+        
+        plt.tight_layout()
+        file_suffix = suffix if suffix else title_suffix.lower().replace(' ', '_')
+        save_path = self.save_image(f"{prefix}_all_channels_{file_suffix}_spectogram", "stereo")
+        ensure_dir(os.path.dirname(save_path))
+        plt.savefig(save_path)
+        plt.close()
 
 
 class Audio(AudioStream):
